@@ -158,6 +158,7 @@ def compare_model_results(
     dataframe: pd.DataFrame,
     models: list[RandomForestClassifier],
     hyperparameters: list[dict[str, Optional[Any]]],
+    force_plot: bool = False
 ) -> RandomForestClassifier:
     """
     Compares the results of different models on a given dataframe using specified hyperparameters.
@@ -165,6 +166,7 @@ def compare_model_results(
         dataframe (pd.DataFrame): The input dataframe.
         models (list[RandomForestClassifier]): List of models to compare.
         hyperparameters (list[dict[str, Optional[Any]]]): List of hyperparameters for each model.
+        force_plot (bool): force plotly to plot (for example for notebook)
     Returns:
         RandomForestClassifier: The best performing model based on F1 score.
     """
@@ -200,6 +202,9 @@ def compare_model_results(
     )
 
     Deck("Parallel Coordinates", plotly.io.to_html(fig))
+
+    if force_plot:
+        fig.show()
     
     return models[which_best]
 
@@ -208,12 +213,14 @@ def compare_model_results(
 def analyze_model(
     model: RandomForestClassifier,
     dataframe: pd.DataFrame,
+    force_plot: bool = False
 ) -> None:
     """
     Analyzes the performance of a RandomForestClassifier model on a given dataframe.
     Parameters:
         model (RandomForestClassifier): The trained RandomForestClassifier model.
         dataframe (pd.DataFrame): The dataframe containing the data for analysis.
+        force_plot (bool, optional): Whether to force plotly to plot (for example for notebook)
     Returns:
         None
     """
@@ -225,6 +232,9 @@ def analyze_model(
     confusion_matrix_plot = plot_confusion_matrix(y_true=y_test, y_pred=yhat)
 
     Deck("Confusion Matrix", plotly.io.to_html(confusion_matrix_plot))
+
+    if force_plot:
+        confusion_matrix_plot.show()
     
 
 @workflow
