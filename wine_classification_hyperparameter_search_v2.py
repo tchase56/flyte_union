@@ -1,5 +1,5 @@
 from itertools import product
-from typing import Any, Optional
+from typing import Any, Optional, Dict
 from functools import partial
 import operator
 
@@ -76,7 +76,7 @@ def split(dataframe: pd.DataFrame, test_size: float=0.25) -> tuple[pd.DataFrame,
 @task(container_image=sklearn_image_spec, cache=True, cache_version=cache_version, enable_deck=True)
 def train_model(
     dataframe: pd.DataFrame,
-    hyperparameters: dict[str, Optional[Any]]
+    hyperparameters: Dict[str, Optional[Any]]
 ) -> RandomForestClassifier:
     """
     Trains a random forest classifier model using the given dataframe and hyperparameters.
@@ -241,7 +241,7 @@ def analyze_model(
 def training_workflow(grid: dict[str, list[Optional[Any]]] = {
     'max_depth': [10, 50, 100],
     'max_features': [None, 'sqrt'],
-    'n_estimators': [100, 2000]
+    'n_estimators': [100, 1000, 2000]
 }) -> RandomForestClassifier:
     """
     Executes the training workflow for a random forest classifier.

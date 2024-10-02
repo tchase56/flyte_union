@@ -1,56 +1,57 @@
-import base64
-import io
-import html
 from functools import partial
 from itertools import product
-from textwrap import dedent
 import pandas as pd
 import numpy as np
 from sklearn.datasets import load_wine
 from sklearn.ensemble import RandomForestClassifier 
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import (
-    classification_report,
-    ConfusionMatrixDisplay,
-    confustion_matrix,
-    f1_score
-)
-from flytekit import task, workflow
-from typing import List, Tuple, Dict, Optional, Any
-from flytekit import ImageSpec, Deck, current_context, map_task
-# import mlflow
-# from flytekitplugins.mlflow import mlflow_autolog
-from sklearn.model_selection import GridSearchCV
-import matplotlib as mpl
-import matplotlib.pyplot as plt
+from sklearn.metrics import f1_score, confusion_matrix, classification_report
+from flytekit import task, workflow, Secret, current_context
+from flytekit import task
 
+from typing import List, Tuple, Dict, Optional, Any
+from flytekit import ImageSpec
+from flytekit import ImageSpec, map_task, Deck
+
+import plotly.express as px
+import plotly
+import plotly.figure_factory as ff
+
+
+
+# sklearn_image_spec = ImageSpec(
+#     name='wine',
+#     packages=["scikit-learn==1.5.1", "pandas==2.2.2", 'pyarrow', 'fastparquet', 'matplotlib', 'plotly'],
+#     registry='us-east4-docker.pkg.dev/union-ai-poc/fbin-union-ai-poc-docker',
+#     base_image="ghcr.io/flyteorg/flytekit:py3.11-latest"
+# )
 
 sklearn_image_spec = ImageSpec(
     name='wine',
-    packages=["scikit-learn==1.5.1", "pandas==2.2.2", 'pyarrow', 'fastparquet', 'matplotlib'],
+    requirements='requirements_prod.txt',
     registry='us-east4-docker.pkg.dev/union-ai-poc/fbin-union-ai-poc-docker',
     base_image="ghcr.io/flyteorg/flytekit:py3.11-latest"
 )
 
 cache_version = "cache-v1"
+cache = True
 
-@task(container_image=sklearn_image_spec, cache=True, cache_version=cache_version)
+@task(container_image=sklearn_image_spec, cache=cache, cache_version=cache_version)
+# @task(container_image=sklearn_image_spec, cache=cache, cache_version=cache_version, secret_requests = [Secret(group=None, key="WANDB_API_KEY")])
+# @task(cache=True, cache_version=cache_version)
+# @task()
+# @task(container_image=sklearn_image_spec)
 def get_data() -> pd.DataFrame:
-    """
-    Get the wine dataset
-    
-    Parameters:
-        None
-
-    Returns:
-        (pd.DataFrame): The wine dataset
-    """
+    # print('WANDB_API_KEY')
+    # print(current_context().secrets.get(key="WANDB_API_KEY"))
+    # print('FBIN_SNOWFLAKE_USER')
+    # print(current_context().secrets.get(key="FBIN_SNOWFLAKE_USER"))
     # Load Data 
     data = load_wine(as_frame=True).frame
 
     return data
 
-@task(container_image=sklearn_image_spec, cache=True, cache_version=cache_version)
+@task(container_image=sklearn_image_spec, cache=cache, cache_version=cache_version)
 def split_data(data: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Split the data into training and testing sets using stratified sampling
@@ -74,11 +75,11 @@ def split_data(data: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataF
 
     return X_train, X_val, X_test, y_train, y_val, y_test
     
-@task(container_image=sklearn_image_spec, cache=True, cache_version=cache_version)
+@task(container_image=sklearn_image_spec, cache=cache, cache_version=cache_version)
 def train_model(
     X_train: pd.DataFrame,
     y_train: pd.DataFrame,
-    hyperparameters Dict[str, Optional[Any]]
+    hyperparameters: Dict[str, Optional[Any]]
 ) -> RandomForestClassifier:
     """
     Trains a random forest classifier model using the given dataframe and hyperparameters
@@ -93,11 +94,11 @@ def train_model(
     """
 
     model = RandomForestClassifier(**hyperparameters)
-    model.fit(X_train, y_train)
+    model.fit(X_train, y_train['target'])
 
     return model
 
-@task(container_image=sklearn_image_spec, cache=True, cache_version=cache_version)
+@task(container_image=sklearn_image_spec, cache=cache, cache_version=cache_version)
 def create_search_grid(
     grid: Dict[str, List[Optional[Any]]]
 ) -> List[Dict[str, Optional[Any]]]:
@@ -116,11 +117,13 @@ def create_search_grid(
     
     return [dict(zip(grid.keys(), values)) for values in product_values]
 
-@task(container_image=sklearn_image_spec, cache=True, cache_version=cache_version)
+@task(container_image=sklearn_image_spec, cache=cache, cache_version=cache_version, enable_deck=True)
 def compare_model_results(
     X_val: pd.DataFrame,
     y_val: pd.DataFrame,
-    models: List[RandomForestClassifier]
+    models: List[RandomForestClassifier],
+    hyperparameters: List[Dict[str, Optional[Any]]],
+    force_plot: bool = False
 ) -> RandomForestClassifier:
     """
     Compares the results of different models on a given dataframe using specified hyperparameters
@@ -129,67 +132,175 @@ def compare_model_results(
         X_val (pd.DataFrame): the validation data
         y_val (pd.DatFrame): the validation target
         models (List[RandomForestClassifier]): list of models to compare
+        hyperparameters (List[Dict[str, Optional[Any]]]): list of hyperparameters for each model
+        force_plot (bool): force plotly to plot (for example for notebook)
 
     Returns:
         RandomForestClassifier: The best performing model based on F1 score
     """
 
-    scores = []
-    params = []
-
+    # Collect all the scores and hyperparameters
+    search_parameters_dict = {}
+    search_parameters_dict['scores'] = []
+    for name in hyperparameters[0].keys():
+        search_parameters_dict[name] = []
     for model in models:
         yhat = model.predict(X_val)
         score = f1_score(y_pred=yhat, y_true=y_val, average='macro')
-        scores.append(score)
-        params.append(model.get_params(deep=False))
+        search_parameters_dict['scores'].append(score)
+        for name in hyperparameters[0].keys():
+            search_parameters_dict[name].append(getattr(model, name))
 
-    best_index = np.array(scores).argmax()
+    # Select the best model
+    best_index = np.array(search_parameters_dict['scores']).argmax()
     best_model = models[best_index]
 
-    search_parameters = pd.DataFrame(params)
-    search_parameters['f1_score'] = scores
+    # Create dataframe of hyperparameters and scores
+    search_parameters = pd.DataFrame(search_parameters_dict)
+
+    # Create figure for parameters explored
+    fig = px.parallel_coordinates(
+        search_parameters, color="scores",
+        dimensions=hyperparameters[0].keys(),
+        color_continuous_scale=px.colors.diverging.Tealrose,
+        color_continuous_midpoint=2
+    )
+    fig.update_layout(
+        title_text='Parellel Coordinates',
+        xaxis = dict(title='Hyperparameter Names'),
+        yaxis = dict(title='Hyperparameter Value')
+    )
+    deck_obj = Deck("Parallel Coordinates")
+    deck_obj.append(plotly.io.to_html(fig))
+    deck_obj.append(search_parameters.to_html())
+
+    if force_plot:
+        fig.show()
 
     return best_model
 
+def plot_confusion_matrix(y_true: pd.DataFrame, y_pred: pd.DataFrame, title: str):
+    """
+    Plots a confusion matrix based on the true labels and predicted labels.
 
+    Parameters:
+        y_true (pd.DataFrame): The true labels.
+        y_pred (pd.DataFrame): The predicted labels.
+        title (str): The title of the plot.
 
-# @task(enable_deck=True, container_image=sklearn_image_spec)
-# # @mlflow_autolog(framework=mlflow.sklearn)
-# def hyperparameter_search(
-#     X_train: pd.DataFrame,
-#     X_test: pd.DataFrame,
-#     y_train: pd.DataFrame,
-#     y_test: pd.DataFrame
-# ) -> RandomForestClassifier:
-#     """
-#     Do hyperparameter tuning on a RandomForestClassifier and then display the results of the best model
+    Returns:
+        (plotly.graph_objects.Figure): The confusion matrix plot.
+    """
+    
+    # Create confusion matrix
+    array = confusion_matrix(y_true, y_pred)
+    labels = sorted(y_true.target.unique().tolist())
 
-#     Parameters:
-#         X_train (pd.DataFrame): The training data
-#         X_test (pd.DataFrame): The testing data
-#         y_train (pd.DataFrame): The training target
-#         y_test (pd.DataFrame): The testing target
+    # change each element of z to type string for annotations
+    z_text = [[str(y) for y in x] for x in array.tolist()]
 
-#     Returns:
-#         (RandomForestClassifier): The best model
-#     """
+    # set up figure 
+    fig = ff.create_annotated_heatmap(array, x=labels, y=labels, annotation_text=z_text, colorscale='Viridis')
 
-#     # Hyperparameter Search
-#     params = {
-#         'max_depth': [10, 50, 100],
-#         'max_features': [None, 'sqrt'],
-#         'n_estimators': [100, 1000, 2000]
-#     }
-#     model = RandomForestClassifier()
-#     grid_search = GridSearchCV(model, param_grid=params, scoring='f1_macro')  
-#     grid_search.fit(X_train, y_train['target'])
+    # add title
+    fig.update_layout(
+        title_text=title,
+        xaxis = dict(title='Predicted Label'),
+        yaxis = dict(title='Actual Label')
+    )
 
-#     _create_flytedeck(grid_search, X_train, X_test, y_train, y_test)
+    # # add custom xaxis title
+    # fig.add_annotation(dict(
+    #     font=dict(color="black",size=14),
+    #     x=0.5,
+    #     y=-0.15,
+    #     showarrow=False,
+    #     text="Predicted value",
+    #     xref="paper",
+    #     yref="paper",
+    # ))
 
-#     return grid_search.best_estimator_
+    # # add custom yaxis title
+    # fig.add_annotation(dict(
+    #     font=dict(color="black",size=14),
+    #     x=-0.35,
+    #     y=0.5,
+    #     showarrow=False,
+    #     text="Real value",
+    #     textangle=-90,
+    #     xref="paper",
+    #     yref="paper"
+    # ))
+
+    # # adjust margins to make room for yaxis title
+    # fig.update_layout(margin=dict(t=50, l=200))
+
+    # # add colorbar
+    # fig['data'][0]['showscale'] = True
+    
+    return fig
+
+@task(container_image=sklearn_image_spec, cache=cache, cache_version=cache_version, enable_deck=True)
+def analyze_model(
+    X_train: pd.DataFrame,
+    y_train: pd.DataFrame,
+    X_val: pd.DataFrame,
+    y_val: pd.DataFrame,
+    X_test: pd.DataFrame,
+    y_test: pd.DataFrame,
+    model: RandomForestClassifier,
+    force_plot: bool = False
+) -> None:
+    """
+    Analyzes the performance of a RandomForestClassifier model on a given dataframe.
+    Parameters:
+        X_train (pd.DataFrame): The training data
+        y_train (pd.DataFrame): The training target
+        X_val (pd.DataFrame): The validation data
+        y_val (pd.DataFrame): The validation target
+        X_test (pd.DataFrame): The testing data
+        y_test (pd.DataFrame): The testing target
+        model (RandomForestClassifier): The trained RandomForestClassifier model.
+        dataframe (pd.DataFrame): The dataframe containing the data for analysis.
+        force_plot (bool, optional): Whether to force plotly to plot (for example for notebook)
+    Returns:
+        None
+    """
+    # Create predicted labels
+    yhat_train = model.predict(X_train)
+    yhat_val = model.predict(X_val)
+    yhat_test = model.predict(X_test)
+    
+    # Create confusion matrix plots
+    confusion_matrix_plot_train = plot_confusion_matrix(y_true=y_train, y_pred=yhat_train, title="Training Set")
+    confusion_matrix_plot_val = plot_confusion_matrix(y_true=y_val, y_pred=yhat_val, title="Validation Set")
+    confusion_matrix_plot_test = plot_confusion_matrix(y_true=y_test, y_pred=yhat_test, title="Test Set")
+
+    # Create classification reports
+    class_report_train = pd.DataFrame(classification_report(y_train, yhat_train, output_dict=True))
+    class_report_val = pd.DataFrame(classification_report(y_val, yhat_val, output_dict=True))
+    class_report_test = pd.DataFrame(classification_report(y_test, yhat_test, output_dict=True))
+
+    # Add to the flyte deck
+    deck_obj = Deck("Confusion Matrix")
+    deck_obj.append(confusion_matrix_plot_train.to_html())
+    deck_obj.append(class_report_train.to_html())
+    deck_obj.append(confusion_matrix_plot_val.to_html())
+    deck_obj.append(class_report_val.to_html())
+    deck_obj.append(confusion_matrix_plot_test.to_html())
+    deck_obj.append(class_report_test.to_html())
+
+    # Display charts and data if displaying in notebook
+    if force_plot:
+        confusion_matrix_plot_train.show()
+        print(class_report_train)
+        confusion_matrix_plot_val.show()
+        print(class_report_val)
+        confusion_matrix_plot_test.show()
+        print(class_report_test)
 
 @workflow
-def training_workflow(
+def training_workflow_8(
     grid: Dict[str, List[Optional[Any]]] = {
         'max_depth': [10, 50, 100],
         'max_features': [None, 'sqrt'],
@@ -205,118 +316,35 @@ def training_workflow(
     Returns:
         (RandomForestClassifier): The best model
     """
-    # raise Exception("This is a test")
+    # Load wine data
     data = get_data()
 
+    # Split data
     X_train, X_val, X_test, y_train, y_val, y_test = split_data(data=data)
 
+    # Create search grid
     hyperparameters = create_search_grid(grid=grid)
 
+    # Train models in parallel
     partial_function = partial(train_model, X_train=X_train, y_train=y_train)
     map_task_obj = map_task(partial_function)
     models = map_task_obj(hyperparameters=hyperparameters)
 
-    best_model = compare_model_results(X_val, y_val, models)
+    # Return the best model 
+    best_model = compare_model_results(X_val, y_val, models, hyperparameters)
+
+    # Analyze the best model
+    analyze_model(
+        X_train=X_train,
+        y_train=y_train,
+        X_val=X_val,
+        y_val=y_val,
+        X_test=X_test,
+        y_test=y_test,
+        model=best_model
+    )
 
     return best_model
-
-# def _convert_fig_into_html(fig: mpl.figure.Figure) -> str:
-#     """
-#     Convert a matplotlib figure into an HTML image string
-
-#     Parameters:
-#         fig (mpl.figure.Figure): The figure to convert
-
-#     Returns:
-#         (str): The HTML image string
-#     """
-#     img_buf = io.BytesIO()
-#     fig.savefig(img_buf, format="png")
-#     img_base64 = base64.b64encode(img_buf.getvalue()).decode()
-#     return f'<img src="data:image/png;base64,{img_base64}" alt="Rendered Image" />'
-
-# def _create_flytedeck(
-#         grid_search: GridSearchCV,
-#         X_train: pd.DataFrame,
-#         X_test: pd.DataFrame,
-#         y_train: pd.DataFrame,
-#         y_test: pd.DataFrame
-# ) -> None:
-#     """
-#     Create additional charts and plots in the flyte deck
-
-#     Parameters:
-#         grid_search (RandomForestClassifier): The best model
-#         X_train (pd.DataFrame): The training data
-#         X_test (pd.DataFrame): The testing data
-#         y_train (pd.DataFrame): The training target
-#         y_test (pd.DataFrame): The testing target
-
-#     Returns:
-#         None
-#     """
-
-#     # Evaluate the Best Model and add to the flyte deck
-#     best_model = grid_search.best_estimator_
-#     y_train_pred = best_model.predict(X_train)
-#     y_test_pred = best_model.predict(X_test)
-#     experiment_results = pd.DataFrame(grid_search.cv_results_)
-#     pd.DataFrame(grid_search.cv_results_)
-
-#     ############################
-#     # Metrics of Best Model 
-#     ############################
-#     metrics_deck = Deck("Metrics")
-
-#     # train
-#     fig, ax = plt.subplots()
-#     ax.set_title("Confusion Matrix: Train")
-#     ConfusionMatrixDisplay.from_predictions(y_train, y_train_pred, ax=ax)
-#     metrics_deck.append(_convert_fig_into_html(fig))
-#     class_report = classification_report(y_train, y_train_pred)
-#     print("Classification report: Train")
-#     print(class_report)
-#     report = html.escape(class_report)
-#     html_report = dedent(
-#         f"""\
-#     <h2>Classification report: Train</h2>
-#     <pre>{report}</pre>"""
-#     )
-#     metrics_deck.append(html_report)
-
-#     # test
-#     fig2, ax2 = plt.subplots()
-#     ax2.set_title("Confusion Matrix: Test")
-#     ConfusionMatrixDisplay.from_predictions(y_test, y_test_pred, ax=ax2)
-#     metrics_deck.append(_convert_fig_into_html(fig2))
-#     class_report2 = classification_report(y_test, y_test_pred)
-#     print("Classification report: Test")
-#     print(class_report2)
-#     report2 = html.escape(class_report2)
-#     html_report2 = dedent(
-#         f"""\
-#     <h2>Classification report: Test</h2>
-#     <pre>{report2}</pre>"""
-#     )
-#     metrics_deck.append(html_report2)
-#     ctx = current_context()
-#     ctx.decks.insert(0, metrics_deck)
-
-#     ############################
-#     # Experiment Results
-#     ############################
-#     experiment_deck = Deck("Experiment Results")
-#     print("Experiment Results")
-#     print(experiment_results)
-#     report = html.escape(experiment_results)
-#     html_report3 = dedent(
-#         f"""\
-#     <h2>Experiment Results</h2>
-#     <pre>{experiment_results}</pre>"""
-#     )
-#     experiment_deck.append(html_report3)
-#     ctx.decks.insert(0, experiment_deck)
-
 
 if __name__ == "__main__":
     training_workflow()

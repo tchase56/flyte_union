@@ -217,7 +217,7 @@ def _create_flytedeck(
     html_report3 = dedent(
         f"""\
     <h2>Experiment Results</h2>
-    <pre>{experiment_results}</pre>"""
+    <pre>{experiment_results.to_html()}</pre>"""
     )
     experiment_deck.append(html_report3)
     ctx.decks.insert(0, experiment_deck)
