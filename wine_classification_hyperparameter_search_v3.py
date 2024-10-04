@@ -5,21 +5,20 @@ import numpy as np
 from sklearn.datasets import load_wine
 from sklearn.ensemble import RandomForestClassifier 
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import f1_score, confusion_matrix, classification_report
+from sklearn.metrics import f1_score, confusion_matrix, classification_report, accuracy_score
 from flytekit import task, workflow, Secret, current_context
 from flytekit import task
 
 from typing import List, Tuple, Dict, Optional
 from flytekit import ImageSpec
 from flytekit import ImageSpec, map_task, Deck
+from flytekitplugins.wandb import wandb_init
 
 import plotly.express as px
 import plotly
 import plotly.figure_factory as ff
 
 import wandb
-from wandb.integration.random_forest import WandbCallback
-
 
 
 # sklearn_image_spec = ImageSpec(
@@ -39,7 +38,10 @@ sklearn_image_spec = ImageSpec(
 cache_version = "cache-v1"
 cache = False
 
+wandb_project_name = "wine-classification-test"
 wandb_secret = Secret(key='WANDB_API_KEY')
+wandb_project = 'eif'
+wandb_entity = 'tyler-chase-fortune-brands-innovations'
 
 # @task(container_image=sklearn_image_spec, cache=cache, cache_version=cache_version)
 @task(container_image=sklearn_image_spec, cache=cache, cache_version=cache_version)
@@ -77,10 +79,12 @@ def split_data(data: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataF
     return X_train, X_val, X_test, y_train, y_val, y_test
     
 @task(container_image=sklearn_image_spec, cache=cache, cache_version=cache_version, secret_requests = [wandb_secret])
-@wandb_init(secret=wandb_secret)
+@wandb_init(project = wandb_project, entity = wandb_entity, secret=wandb_secret)
 def train_model(
     X_train: pd.DataFrame,
     y_train: pd.DataFrame,
+    X_val: pd.DataFrame,
+    y_val: pd.DataFrame,
     hyperparameters: Dict[str, Optional[float|str|int|None]],
 ) -> RandomForestClassifier:
     """
@@ -89,14 +93,20 @@ def train_model(
     Parameters:
         X_train (pd.DataFrame): the training data
         y_train (pd.DataFrame): the training target
+        X_val (pd.DataFrame): the validation data
+        y_val (pd.DataFrame): the validation target
         hyperparameters(Dict[str, Optional[float|str|int|None]]): the hyperparameters for the random forest classifier model
 
     Returns:
         (RandomForestClassifier): the trained random forest classifier model
     """
 
-    model = RandomForestClassifier(**hyperparameters, callbacks=[WandbCallback(log_model=True)])
+    model = RandomForestClassifier(**hyperparameters)
     model.fit(X_train, y_train['target'])
+    y_pred = model.predict(X_val)
+    for i in hyperparameters:
+        wandb.log({i: hyperparameters[i]})
+    wandb.log({"accuracy": accuracy_score(y_val, y_pred)})
 
     return model
 
@@ -328,7 +338,7 @@ def training_workflow(
     hyperparameters = create_search_grid(grid=grid)
 
     # Train models in parallel
-    partial_function = partial(train_model, X_train=X_train, y_train=y_train)
+    partial_function = partial(train_model, X_train=X_train, y_train=y_train, X_val=X_val, y_val=y_val) 
     map_task_obj = map_task(partial_function)
     models = map_task_obj(hyperparameters=hyperparameters)
 

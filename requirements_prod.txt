@@ -4,3 +4,5 @@ pyarrow==14.0.2
 matplotlib==3.8.4
 plotly==5.22.0
 numpy==1.26.4
+wandb==0.18.3
+flytekitplugins-wandb==1.13.7

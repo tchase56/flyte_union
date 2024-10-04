@@ -8,3 +8,5 @@ ipykernel==6.29.5
 fastparquet==2024.5.0
 union[byoc]>=0.1.70
 numpy==1.26.4
+wandb==0.18.3
+flytekitplugins-wandb==1.13.7
