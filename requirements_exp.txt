@@ -1,0 +1,10 @@
+scikit-learn==1.5.1 
+pandas==2.2.2
+pyarrow==14.0.2
+matplotlib==3.8.4
+plotly==5.22.0
+flytekit==1.13.3
+ipykernel==6.29.5
+fastparquet==2024.5.0
+union[byoc]>=0.1.70
+numpy==1.26.4

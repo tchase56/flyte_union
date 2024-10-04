@@ -1,33 +1,17 @@
 from functools import partial
 from itertools import product
+from dataclasses import dataclass
+
 import pandas as pd
 import numpy as np
 from sklearn.datasets import load_wine
 from sklearn.ensemble import RandomForestClassifier 
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import f1_score, confusion_matrix, classification_report
-from flytekit import task, workflow, Secret, current_context
-from flytekit import task
-
-from typing import List, Tuple, Dict, Optional
-from flytekit import ImageSpec
-from flytekit import ImageSpec, map_task, Deck
-
 import plotly.express as px
 import plotly
 import plotly.figure_factory as ff
-
-import wandb
-from wandb.integration.random_forest import WandbCallback
-
-
-
-# sklearn_image_spec = ImageSpec(
-#     name='wine',
-#     packages=["scikit-learn==1.5.1", "pandas==2.2.2", 'pyarrow', 'fastparquet', 'matplotlib', 'plotly'],
-#     registry='us-east4-docker.pkg.dev/union-ai-poc/fbin-union-ai-poc-docker',
-#     base_image="ghcr.io/flyteorg/flytekit:py3.11-latest"
-# )
+from flytekit import task, workflow, ImageSpec, map_task, Deck
 
 sklearn_image_spec = ImageSpec(
     name='wine',
@@ -37,23 +21,40 @@ sklearn_image_spec = ImageSpec(
 )
 
 cache_version = "cache-v1"
-cache = False
+cache = True
 
-wandb_secret = Secret(key='WANDB_API_KEY')
+@dataclass
+class SearchSpace:
+    max_depth: list[int]
+    max_features: list[str | None]
+    n_estimators: list[int]
 
-# @task(container_image=sklearn_image_spec, cache=cache, cache_version=cache_version)
+@dataclass
+class Hyperparameters:
+    max_depth: int
+    max_features: str | None
+    n_estimators: int
+
+
+
 @task(container_image=sklearn_image_spec, cache=cache, cache_version=cache_version)
-# @task(cache=True, cache_version=cache_version)
-# @task()
-# @task(container_image=sklearn_image_spec)
 def get_data() -> pd.DataFrame:
+    """
+    Read in wine classification data
+
+    Parameters:
+        None
+
+    Returns:
+        pd.DataFrame: The wine dataset
+    """
     # Load Data 
     data = load_wine(as_frame=True).frame
 
     return data
 
 @task(container_image=sklearn_image_spec, cache=cache, cache_version=cache_version)
-def split_data(data: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def split_data(data: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Split the data into training and testing sets using stratified sampling
     
@@ -76,12 +77,11 @@ def split_data(data: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataF
 
     return X_train, X_val, X_test, y_train, y_val, y_test
     
-@task(container_image=sklearn_image_spec, cache=cache, cache_version=cache_version, secret_requests = [wandb_secret])
-@wandb_init(secret=wandb_secret)
+@task(container_image=sklearn_image_spec, cache=cache, cache_version=cache_version)
 def train_model(
     X_train: pd.DataFrame,
     y_train: pd.DataFrame,
-    hyperparameters: Dict[str, Optional[float|str|int|None]],
+    hyperparameters: Hyperparameters
 ) -> RandomForestClassifier:
     """
     Trains a random forest classifier model using the given dataframe and hyperparameters
@@ -89,42 +89,41 @@ def train_model(
     Parameters:
         X_train (pd.DataFrame): the training data
         y_train (pd.DataFrame): the training target
-        hyperparameters(Dict[str, Optional[float|str|int|None]]): the hyperparameters for the random forest classifier model
+        hyperparameters(Hyperparameters): the hyperparameters for the random forest classifier model
 
     Returns:
         (RandomForestClassifier): the trained random forest classifier model
     """
 
-    model = RandomForestClassifier(**hyperparameters, callbacks=[WandbCallback(log_model=True)])
+    model = RandomForestClassifier(**vars(hyperparameters))
     model.fit(X_train, y_train['target'])
 
     return model
 
 @task(container_image=sklearn_image_spec, cache=cache, cache_version=cache_version)
-def create_search_grid(
-    grid: Dict[str, List[Optional[float|str|int|None]]]
-) -> List[Dict[str, Optional[float|str|int|None]]]:
+def create_search_grid(search_space: SearchSpace) -> list[Hyperparameters]:
     """
     Generate a search grid based on the given dictionary of lists.
 
     Parameters:
-        grid (dict[str, list[Optional[float|str|int|None]]]): A dictionary where the keys represent the parameter names and the values are lists of possible values for each parameter
+        grid (SearchSpace): A dictionary where the keys represent the parameter names and the values are lists of possible values for each parameter
 
     Returns:
-        list[dict[str, Optional[float|str|int|None]]]: Each possible permutation of the hyperparameter choices.
+        list[Hyperparameters]: Each possible permutation of the hyperparameter choices.
     """
     
+    keys = search_space.__annotations__.keys()
+    values = [getattr(search_space, key) for key in keys]
     
-    product_values = product(*[v if isinstance(v, (list, tuple)) else [v] for v in grid.values()])
+    grid = [Hyperparameters(**dict(zip(keys, combination))) for combination in product(*values)]
     
-    return [dict(zip(grid.keys(), values)) for values in product_values]
+    return grid
 
 @task(container_image=sklearn_image_spec, cache=cache, cache_version=cache_version, enable_deck=True)
 def compare_model_results(
     X_val: pd.DataFrame,
     y_val: pd.DataFrame,
-    models: List[RandomForestClassifier],
-    hyperparameters: List[Dict[str, Optional[float|str|int|None]]],
+    models: list[RandomForestClassifier],
     force_plot: bool = False
 ) -> RandomForestClassifier:
     """
@@ -134,23 +133,24 @@ def compare_model_results(
         X_val (pd.DataFrame): the validation data
         y_val (pd.DatFrame): the validation target
         models (List[RandomForestClassifier]): list of models to compare
-        hyperparameters (List[Dict[str, Optional[float|str|int|None]]]): list of hyperparameters for each model
         force_plot (bool): force plotly to plot (for example for notebook)
 
     Returns:
         RandomForestClassifier: The best performing model based on F1 score
     """
+    
+    param_names = list(Hyperparameters.__annotations__.keys())
 
     # Collect all the scores and hyperparameters
     search_parameters_dict = {}
     search_parameters_dict['scores'] = []
-    for name in hyperparameters[0].keys():
+    for name in param_names:
         search_parameters_dict[name] = []
     for model in models:
         yhat = model.predict(X_val)
         score = f1_score(y_pred=yhat, y_true=y_val, average='macro')
         search_parameters_dict['scores'].append(score)
-        for name in hyperparameters[0].keys():
+        for name in param_names:
             search_parameters_dict[name].append(getattr(model, name))
 
     # Select the best model
@@ -163,7 +163,7 @@ def compare_model_results(
     # Create figure for parameters explored
     fig = px.parallel_coordinates(
         search_parameters, color="scores",
-        dimensions=hyperparameters[0].keys(),
+        dimensions=param_names,
         color_continuous_scale=px.colors.diverging.Tealrose,
         color_continuous_midpoint=2
     )
@@ -210,35 +210,6 @@ def plot_confusion_matrix(y_true: pd.DataFrame, y_pred: pd.DataFrame, title: str
         xaxis = dict(title='Predicted Label'),
         yaxis = dict(title='Actual Label')
     )
-
-    # # add custom xaxis title
-    # fig.add_annotation(dict(
-    #     font=dict(color="black",size=14),
-    #     x=0.5,
-    #     y=-0.15,
-    #     showarrow=False,
-    #     text="Predicted value",
-    #     xref="paper",
-    #     yref="paper",
-    # ))
-
-    # # add custom yaxis title
-    # fig.add_annotation(dict(
-    #     font=dict(color="black",size=14),
-    #     x=-0.35,
-    #     y=0.5,
-    #     showarrow=False,
-    #     text="Real value",
-    #     textangle=-90,
-    #     xref="paper",
-    #     yref="paper"
-    # ))
-
-    # # adjust margins to make room for yaxis title
-    # fig.update_layout(margin=dict(t=50, l=200))
-
-    # # add colorbar
-    # fig['data'][0]['showscale'] = True
     
     return fig
 
@@ -303,12 +274,11 @@ def analyze_model(
 
 @workflow
 def training_workflow(
-    grid: Dict[str, List[Optional[float|str|int|None]]] = {
-        'max_depth': [10, 50, 100],
-        'max_features': [None, 'sqrt'],
-        'n_estimators': [100, 2000]
-    }
-) -> RandomForestClassifier:
+    search_space: SearchSpace = SearchSpace(
+        max_depth=[50, 100], 
+        max_features=[None, 'sqrt'], 
+        n_estimators=[100, 2000])
+    ) -> RandomForestClassifier:
     """
     Create workflow DAG (composed of tasks) to train a RandomForestClassifier on the wine dataset
 
@@ -325,7 +295,7 @@ def training_workflow(
     X_train, X_val, X_test, y_train, y_val, y_test = split_data(data=data)
 
     # Create search grid
-    hyperparameters = create_search_grid(grid=grid)
+    hyperparameters = create_search_grid(search_space=search_space)
 
     # Train models in parallel
     partial_function = partial(train_model, X_train=X_train, y_train=y_train)
@@ -333,7 +303,7 @@ def training_workflow(
     models = map_task_obj(hyperparameters=hyperparameters)
 
     # Return the best model 
-    best_model = compare_model_results(X_val, y_val, models, hyperparameters)
+    best_model = compare_model_results(X_val, y_val, models)
 
     # Analyze the best model
     analyze_model(
